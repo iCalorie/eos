@@ -31,6 +31,8 @@
 #include <mongocxx/exception/operation_exception.hpp>
 #include <mongocxx/exception/logic_error.hpp>
 
+#include <eosio/mongo_db_plugin/ram_market.hpp>
+
 namespace fc { class variant; }
 
 namespace eosio {
@@ -1091,6 +1093,7 @@ void mongo_db_plugin::set_program_options(options_description& cli, options_desc
 
 void mongo_db_plugin::plugin_initialize(const variables_map& options)
 {
+  RamMarket m{};
    try {
       if( options.count( "mongodb-uri" )) {
          ilog( "initializing mongo_db_plugin" );
