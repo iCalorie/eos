@@ -14,10 +14,10 @@ using chain::symbol;
 RamMarket::RamMarket(){
     supply = asset(100000000000000ll,symbol(4,"RAMCORE"));
     base.balance = asset(int64_t(64ll * 1024 * 1024 * 1024),symbol(0,"RAM"));
-    quote.balance = asset(1000000,symbol(CORE_SYMBOL));
+    quote.balance = asset(10000000000ll,symbol(CORE_SYMBOL));
 }
 
-RamMarket::RamMarket(fc::variant &v) {
+RamMarket::RamMarket(const fc::variant &v) {
   supply = asset::from_string(v["supply"].as_string());
   base.balance = asset::from_string(v["base"]["balance"].as_string());
   quote.balance = asset::from_string(v["quote"]["balance"].as_string());
@@ -33,21 +33,6 @@ RamMarket::RamMarket(const RamMarket &r) {
   quote = RamMarket::connector{
       asset(r.quote.balance.get_amount(), r.quote.balance.get_symbol()),
       r.quote.weight};
-}
-
-RamMarket::RAM_EX_ACT RamMarket::is_ram_exchange_action(
-    const chain::action &act) {
-  using eosio::chain::name;
-  if (act.account != chain::config::system_account_name)
-    return RamMarket::RAM_EX_INVALID;
-  if (act.name == N(buyrambytes)) {
-    return RamMarket::RAM_EX_BUY_BYTES;
-  } else if (act.name == N(buyram)) {
-    return RamMarket::RAM_EX_BUY;
-  } else if (act.name == N(sellram)) {
-    return RamMarket::RAM_EX_SELL_BYTES;
-  }
-  return RamMarket::RAM_EX_INVALID;
 }
 
 asset RamMarket::convert_to_exchange(connector &c, asset in) {
@@ -91,7 +76,7 @@ asset RamMarket::convert_from_exchange(connector &c, asset in) {
   return outAsset;
 }
 
-asset RamMarket::convert(asset from, symbol &to) {
+asset RamMarket::convert(asset from, symbol to) {
   auto sell_symbol = from.get_symbol();
   auto ex_symbol = supply.get_symbol();
   auto base_symbol = base.balance.get_symbol();

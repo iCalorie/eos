@@ -8,6 +8,7 @@
 #include <eosio/chain/exceptions.hpp>
 #include <eosio/chain/transaction.hpp>
 #include <eosio/chain/types.hpp>
+#include <eosio/chain/asset.hpp>
 
 #include <fc/io/json.hpp>
 #include <fc/utf8.hpp>
@@ -32,6 +33,7 @@
 #include <mongocxx/exception/logic_error.hpp>
 
 #include <eosio/mongo_db_plugin/ram_market.hpp>
+#include <eosio/mongo_db_plugin/contract_types.hpp>
 
 namespace fc { class variant; }
 
@@ -55,25 +57,40 @@ public:
    mongo_db_plugin_impl();
    ~mongo_db_plugin_impl();
 
+   chain_plugin *chain_plug;
+   RamMarket rammarket;
+
    fc::optional<boost::signals2::scoped_connection> accepted_block_connection;
    fc::optional<boost::signals2::scoped_connection> irreversible_block_connection;
    fc::optional<boost::signals2::scoped_connection> accepted_transaction_connection;
    fc::optional<boost::signals2::scoped_connection> applied_transaction_connection;
+
+   struct action_trace_tuple{
+      const chain::transaction_trace_ptr trace;
+      uint32_t block_num;
+      fc::time_point block_time;
+   };
 
    void consume_blocks();
 
    void accepted_block( const chain::block_state_ptr& );
    void applied_irreversible_block(const chain::block_state_ptr&);
    void accepted_transaction(const chain::transaction_metadata_ptr&);
-   void applied_transaction(const chain::transaction_trace_ptr&);
+   void applied_transaction(const action_trace_tuple&);
    void process_accepted_transaction(const chain::transaction_metadata_ptr&);
    void _process_accepted_transaction(const chain::transaction_metadata_ptr&);
-   void process_applied_transaction(const chain::transaction_trace_ptr&);
-   void _process_applied_transaction(const chain::transaction_trace_ptr&);
+   void process_applied_transaction(const action_trace_tuple&);
+   void _process_applied_transaction(const action_trace_tuple&);
    void process_accepted_block( const chain::block_state_ptr& );
    void _process_accepted_block( const chain::block_state_ptr& );
    void process_irreversible_block(const chain::block_state_ptr&);
    void _process_irreversible_block(const chain::block_state_ptr&);
+
+   void _handle_action_trace(const chain::action_trace&, uint32_t, fc::time_point);
+   void _handle_system_action_trace(const chain::action_trace&, uint32_t, fc::time_point);
+   void _handle_ramex_action_trace(const chain::action_trace&, uint32_t, fc::time_point);
+   void _handle_setram_action_trace(const chain::action_trace&);
+   
 
    void init();
    void wipe_database();
@@ -87,12 +104,13 @@ public:
    mongocxx::instance mongo_inst;
    mongocxx::client mongo_conn;
    mongocxx::collection accounts;
+   mongocxx::collection global_collection;
 
    size_t queue_size = 0;
    std::deque<chain::transaction_metadata_ptr> transaction_metadata_queue;
    std::deque<chain::transaction_metadata_ptr> transaction_metadata_process_queue;
-   std::deque<chain::transaction_trace_ptr> transaction_trace_queue;
-   std::deque<chain::transaction_trace_ptr> transaction_trace_process_queue;
+   std::deque<action_trace_tuple> transaction_trace_queue;
+   std::deque<action_trace_tuple> transaction_trace_process_queue;
    std::deque<chain::block_state_ptr> block_state_queue;
    std::deque<chain::block_state_ptr> block_state_process_queue;
    std::deque<chain::block_state_ptr> irreversible_block_state_queue;
@@ -114,6 +132,8 @@ public:
    static const std::string trans_traces_col;
    static const std::string actions_col;
    static const std::string accounts_col;
+   static const std::string ram_trade_col;
+   static const std::string global_col;
 };
 
 const account_name mongo_db_plugin_impl::newaccount = "newaccount";
@@ -125,6 +145,8 @@ const std::string mongo_db_plugin_impl::trans_col = "transactions";
 const std::string mongo_db_plugin_impl::trans_traces_col = "transaction_traces";
 const std::string mongo_db_plugin_impl::actions_col = "actions";
 const std::string mongo_db_plugin_impl::accounts_col = "accounts";
+const std::string mongo_db_plugin_impl::ram_trade_col = "ram_trade";
+const std::string mongo_db_plugin_impl::global_col = "global";
 
 namespace {
 
@@ -165,9 +187,9 @@ void mongo_db_plugin_impl::accepted_transaction( const chain::transaction_metada
    }
 }
 
-void mongo_db_plugin_impl::applied_transaction( const chain::transaction_trace_ptr& t ) {
+void mongo_db_plugin_impl::applied_transaction( const action_trace_tuple& tp ) {
    try {
-      queue( mtx, condition, transaction_trace_queue, t, queue_size );
+      queue( mtx, condition, transaction_trace_queue, tp, queue_size );
    } catch (fc::exception& e) {
       elog("FC Exception while applied_transaction ${e}", ("e", e.to_string()));
    } catch (std::exception& e) {
@@ -311,6 +333,7 @@ namespace {
       using bsoncxx::builder::basic::kvp;
       return blocks.find_one( make_document( kvp( "block_id", id )));
    }
+
 
    optional<abi_serializer> get_abi_serializer( account_name n, mongocxx::collection& accounts, const fc::microseconds& abi_serializer_max_time ) {
       using bsoncxx::builder::basic::kvp;
@@ -512,6 +535,54 @@ void add_data( bsoncxx::builder::basic::document& act_doc, mongocxx::collection&
    act_doc.append( kvp( "hex_data", fc::variant( act.data ).as_string()));
 }
 
+   void update_rammarket_to_db(mongocxx::collection& global, const RamMarket &market){
+      using bsoncxx::builder::basic::make_document;
+      using bsoncxx::builder::basic::kvp;
+
+      mongocxx::options::update update_opts{};
+      update_opts.upsert( true );
+
+      auto market_doc = make_document(
+            kvp("supply", market.supply.to_string()),
+            kvp("base",make_document(
+              kvp("balance",market.base.balance.to_string()),
+              kvp("weight",fc::to_string(market.base.weight))
+            )),
+            kvp("quote",make_document(
+              kvp("balance",market.quote.balance.to_string()),
+              kvp("weight",fc::to_string(market.quote.weight))
+            ))
+      );
+
+      try{
+        global.update_one(
+           make_document(kvp("key","rammarket")),
+           make_document(kvp("$set", make_document(kvp("value",market_doc)).view())),
+           update_opts
+        );
+      }catch( ... ) {
+        handle_mongo_exception( "rammarket update", __LINE__ );
+      }
+   }
+
+   RamMarket get_rammarket_from_db(mongocxx::collection& global){
+      using bsoncxx::builder::basic::kvp;
+      using bsoncxx::builder::basic::make_document;
+
+      RamMarket market{};
+      auto marketDoc = global.find_one(make_document(kvp("key","rammarket")));
+      if(marketDoc){
+        auto view = marketDoc->view();
+        const fc::variant& val = fc::json::from_string(bsoncxx::to_json(view["value"].get_document()));
+        market = RamMarket(val);
+      }
+      else{
+        update_rammarket_to_db(global,market);
+      }
+      
+      return market;
+   }
+
 } // anonymous namespace
 
 void mongo_db_plugin_impl::process_accepted_transaction( const chain::transaction_metadata_ptr& t ) {
@@ -527,10 +598,10 @@ void mongo_db_plugin_impl::process_accepted_transaction( const chain::transactio
    }
 }
 
-void mongo_db_plugin_impl::process_applied_transaction( const chain::transaction_trace_ptr& t ) {
+void mongo_db_plugin_impl::process_applied_transaction( const action_trace_tuple& tp ) {
    try {
       if( start_block_reached ) {
-         _process_applied_transaction( t );
+         _process_applied_transaction( tp );
       }
    } catch (fc::exception& e) {
       elog("FC Exception while processing applied transaction trace: ${e}", ("e", e.to_detail_string()));
@@ -768,9 +839,11 @@ void mongo_db_plugin_impl::_process_accepted_transaction( const chain::transacti
    }
 }
 
-void mongo_db_plugin_impl::_process_applied_transaction( const chain::transaction_trace_ptr& t ) {
+void mongo_db_plugin_impl::_process_applied_transaction( const action_trace_tuple& tp ) {
    using namespace bsoncxx::types;
    using bsoncxx::builder::basic::kvp;
+
+   const eosio::chain::transaction_trace_ptr &t = tp.trace; 
 
    auto trans_traces = mongo_conn[db_name][trans_traces_col];
    auto trans_traces_doc = bsoncxx::builder::basic::document{};
@@ -802,6 +875,11 @@ void mongo_db_plugin_impl::_process_applied_transaction( const chain::transactio
       }
    } catch(...) {
       handle_mongo_exception("trans_traces insert: " + json, __LINE__);
+   }
+
+   ///handle action trace
+   for(const auto& trace: tp.trace->action_traces){
+      _handle_action_trace(trace, tp.block_num, tp.block_time);
    }
 }
 
@@ -968,6 +1046,158 @@ void mongo_db_plugin_impl::_process_irreversible_block(const chain::block_state_
    }
 }
 
+void mongo_db_plugin_impl::_handle_action_trace(const chain::action_trace& at, uint32_t block_num, fc::time_point block_time ){
+
+    if( at.receipt.receiver == chain::config::system_account_name ){
+      _handle_system_action_trace(at,block_num,block_time);
+    }
+
+    for( const auto& iline : at.inline_traces ) {
+      _handle_action_trace(iline,block_num,block_time );
+    }
+}
+
+void mongo_db_plugin_impl::_handle_system_action_trace(const chain::action_trace& at, uint32_t block_num, fc::time_point block_time ){
+
+    if (at.act.name == N(buyrambytes)||at.act.name == N(buyram)||at.act.name == N(sellram)){
+          _handle_ramex_action_trace(at,block_num,block_time);
+    }else if(at.act.name == N(setram)){
+          _handle_setram_action_trace(at);
+          return;
+    }
+    
+}
+
+void mongo_db_plugin_impl::_handle_setram_action_trace(const chain::action_trace& at){
+   using bsoncxx::builder::basic::make_document;
+   using bsoncxx::builder::basic::kvp;
+   
+   uint64_t max_ram_size = 64ll*1024 * 1024 * 1024;
+   try{
+      auto find = global_collection.find_one(make_document(kvp("key","max_ram_size")));
+      if(find){
+        auto view = find->view();
+        max_ram_size = fc::to_int64(view["value"].get_utf8().value.to_string());
+      }
+   }catch(...){
+      handle_mongo_exception("get global max_ram_size", __LINE__);
+   }
+
+   const auto data = at.act.data_as<chain::setram>();
+   auto delta = int64_t(data.max_ram_size) - int64_t(max_ram_size);
+   rammarket.base.balance += chain::asset(delta,chain::symbol(0,"RAM"));
+
+   update_rammarket_to_db(global_collection,rammarket);
+
+   mongocxx::options::update update_opts{};
+   update_opts.upsert( true );
+
+   try{
+      global_collection.update_one(
+            make_document(kvp("key","max_ram_size")),
+            make_document(kvp("$set",make_document(kvp("value",fc::to_string(data.max_ram_size))).view())) ,
+            update_opts
+      );
+   }catch(...){
+      handle_mongo_exception("update global max_ram_size", __LINE__);
+   }
+   
+}
+
+void mongo_db_plugin_impl::_handle_ramex_action_trace(const chain::action_trace& at, uint32_t block_num, fc::time_point block_time ){
+   using namespace bsoncxx::types;
+   using bsoncxx::builder::basic::make_document;
+   using bsoncxx::builder::basic::kvp;
+   auto& chain = chain_plug->chain();
+   
+   auto act_doc = bsoncxx::builder::basic::document();
+   auto ts = std::chrono::duration_cast<std::chrono::milliseconds>(
+      std::chrono::microseconds{block_time.time_since_epoch().count()});
+   act_doc.append(
+         kvp("global_seq", b_int64{static_cast<int64_t>(at.receipt.global_sequence)}),
+         kvp("block_num", b_int32{static_cast<int32_t>(block_num)}),
+         kvp("block_time",b_date{ts}),
+         kvp("trx_id",at.trx_id.str()),
+         kvp("action",at.act.name.to_string())
+   );
+
+   auto sim_buy_ram = [&](RamMarket &market, int64_t quant)-> std::tuple<int64_t,int64_t> {
+      auto fee = quant;
+      fee = ( fee + 199 ) / 200; /// .5% fee (round up)
+      auto quant_after_fee = quant;
+      quant_after_fee -= fee;
+      int64_t bytes_out = market.convert(chain::asset(quant_after_fee,chain::symbol(CORE_SYMBOL)),chain::symbol(0,"RAM")).get_amount();
+      return {bytes_out,fee};
+   };
+
+   auto sim_sell_ram = [&](RamMarket &market, int64_t bytes)-> std::tuple<int64_t,int64_t> {
+      auto tokens_out = market.convert(chain::asset(bytes,chain::symbol(0,"RAM")), chain::symbol(CORE_SYMBOL)).get_amount();
+      auto fee = ( tokens_out + 199 ) / 200;
+      return {tokens_out,fee};
+   };
+
+   if(at.act.name == N(buyrambytes)){
+      const auto data = at.act.data_as<chain::buyrambytes>();
+      act_doc.append(
+            kvp("is_buy", b_bool{true}),
+            kvp("operator",data.payer.to_string()),
+            kvp("receiver",data.receiver.to_string()),
+            kvp("bytes", b_int64{static_cast<int64_t>(data.bytes)})
+      );
+      RamMarket market1 = RamMarket(rammarket);
+      auto eos_out = market1.convert(chain::asset(static_cast<int64_t>(data.bytes),chain::symbol(0,"RAM")),chain::symbol(CORE_SYMBOL));
+      auto tp = sim_buy_ram(rammarket,eos_out.get_amount());
+      act_doc.append(
+            kvp("price",b_int64{eos_out.get_amount()}),
+            kvp("fee",b_int64{std::get<1>(tp)})
+      );
+   }else if(at.act.name == N(buyram)){
+      const auto data = at.act.data_as<chain::buyram>();
+      act_doc.append(
+            kvp("is_buy", b_bool{true}),
+            kvp("operator",data.payer.to_string()),
+            kvp("receiver",data.receiver.to_string()),
+            kvp("price", b_int64{data.quant.get_amount()})
+      );
+      auto tp = sim_buy_ram(rammarket,data.quant.get_amount());
+      act_doc.append(
+            kvp("bytes",b_int64{std::get<0>(tp)}),
+            kvp("fee",b_int64{std::get<1>(tp)})
+      );
+   }else if(at.act.name == N(sellram)){
+      const auto data = at.act.data_as<chain::sellram>();
+      act_doc.append(
+            kvp("is_buy", b_bool{false}),
+            kvp("operator",data.account.to_string()),
+            kvp("bytes",b_int64{data.bytes})
+      );
+      auto tp = sim_sell_ram(rammarket,data.bytes);
+      act_doc.append(
+            kvp("price",b_int64{std::get<0>(tp)}),
+            kvp("fee",b_int64{std::get<1>(tp)})
+      );
+   }
+   
+   auto ram_trade = mongo_conn[db_name][ram_trade_col];
+
+   mongocxx::options::update update_opts{};
+   update_opts.upsert( true );
+
+
+
+   try{
+      ram_trade.update_one(
+        make_document(kvp("global_seq", fc::to_string(at.receipt.global_sequence))),
+        make_document(kvp("$set",act_doc.view())),
+        update_opts
+      );
+   }catch(...){
+      handle_mongo_exception("record ram exchange action.",__LINE__);
+   }
+
+   update_rammarket_to_db(global_collection,rammarket);
+}
+
 mongo_db_plugin_impl::mongo_db_plugin_impl()
 : mongo_inst{}
 , mongo_conn{}
@@ -996,7 +1226,9 @@ void mongo_db_plugin_impl::wipe_database() {
    auto trans = mongo_conn[db_name][trans_col];
    auto trans_traces = mongo_conn[db_name][trans_traces_col];
    auto actions = mongo_conn[db_name][actions_col];
+   auto ram_trade = mongo_conn[db_name][ram_trade_col];
    accounts = mongo_conn[db_name][accounts_col];
+   global_collection = mongo_conn[db_name][global_col];
 
    block_states.drop();
    blocks.drop();
@@ -1004,6 +1236,8 @@ void mongo_db_plugin_impl::wipe_database() {
    trans_traces.drop();
    actions.drop();
    accounts.drop();
+   ram_trade.drop();
+   global_collection.drop();
 }
 
 void mongo_db_plugin_impl::init() {
@@ -1049,10 +1283,17 @@ void mongo_db_plugin_impl::init() {
 
          auto actions = mongo_conn[db_name][actions_col];
          actions.create_index( bsoncxx::from_json( R"xxx({ "trx_id" : 1 })xxx" ));
+
+         auto ram_trade = mongo_conn[db_name][ram_trade_col];
+         ram_trade.create_index(bsoncxx::from_json( R"xxx({ "global_seq" : 1 })xxx" ));
       } catch(...) {
          handle_mongo_exception("create indexes", __LINE__);
       }
    }
+
+   global_collection = mongo_conn[db_name][global_col];
+   rammarket = get_rammarket_from_db(global_collection);
+
 
    ilog("starting db plugin thread");
 
@@ -1093,7 +1334,6 @@ void mongo_db_plugin::set_program_options(options_description& cli, options_desc
 
 void mongo_db_plugin::plugin_initialize(const variables_map& options)
 {
-  RamMarket m{};
    try {
       if( options.count( "mongodb-uri" )) {
          ilog( "initializing mongo_db_plugin" );
@@ -1136,22 +1376,26 @@ void mongo_db_plugin::plugin_initialize(const variables_map& options)
          chain_plugin* chain_plug = app().find_plugin<chain_plugin>();
          EOS_ASSERT( chain_plug, chain::missing_chain_plugin_exception, ""  );
          auto& chain = chain_plug->chain();
+         my->chain_plug = chain_plug;
          my->chain_id.emplace( chain.get_chain_id());
 
-         my->accepted_block_connection.emplace( chain.accepted_block.connect( [&]( const chain::block_state_ptr& bs ) {
-            my->accepted_block( bs );
-         } ));
-         my->irreversible_block_connection.emplace(
-               chain.irreversible_block.connect( [&]( const chain::block_state_ptr& bs ) {
-                  my->applied_irreversible_block( bs );
-               } ));
+      //TODO: ignore
+      //    my->accepted_block_connection.emplace( chain.accepted_block.connect( [&]( const chain::block_state_ptr& bs ) {
+      //       my->accepted_block( bs );
+      //    } ));
+      //    my->irreversible_block_connection.emplace(
+      //          chain.irreversible_block.connect( [&]( const chain::block_state_ptr& bs ) {
+      //             my->applied_irreversible_block( bs );
+      //          } ));
          my->accepted_transaction_connection.emplace(
                chain.accepted_transaction.connect( [&]( const chain::transaction_metadata_ptr& t ) {
                   my->accepted_transaction( t );
                } ));
          my->applied_transaction_connection.emplace(
                chain.applied_transaction.connect( [&]( const chain::transaction_trace_ptr& t ) {
-                  my->applied_transaction( t );
+                  auto& chain = my->chain_plug->chain();
+                  const auto& tp = mongo_db_plugin_impl::action_trace_tuple{t,chain.pending_block_state()->block_num,chain.pending_block_time()};
+                  my->applied_transaction( tp );
                } ));
 
          if( my->wipe_database_on_startup ) {
