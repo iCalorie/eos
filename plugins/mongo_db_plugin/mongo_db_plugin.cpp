@@ -1134,7 +1134,7 @@ void mongo_db_plugin_impl::_handle_ramex_action_trace(const chain::action_trace&
    auto sim_sell_ram = [&](RamMarket &market, int64_t bytes)-> std::tuple<int64_t,int64_t> {
       auto tokens_out = market.convert(chain::asset(bytes,chain::symbol(0,"RAM")), chain::symbol(CORE_SYMBOL)).get_amount();
       auto fee = ( tokens_out + 199 ) / 200;
-      return {tokens_out,fee};
+      return std::make_tuple(tokens_out,fee);
    };
 
    if(at.act.name == N(buyrambytes)){
