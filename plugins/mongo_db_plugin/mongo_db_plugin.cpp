@@ -1122,13 +1122,13 @@ void mongo_db_plugin_impl::_handle_ramex_action_trace(const chain::action_trace&
          kvp("action",at.act.name.to_string())
    );
 
-   auto sim_buy_ram = [&](RamMarket &market, int64_t quant)-> std::tuple<int64_t,int64_t> {
+   auto sim_buy_ram = [&](RamMarket &market, int64_t quant)-> auto {
       auto fee = quant;
       fee = ( fee + 199 ) / 200; /// .5% fee (round up)
       auto quant_after_fee = quant;
       quant_after_fee -= fee;
       int64_t bytes_out = market.convert(chain::asset(quant_after_fee,chain::symbol(CORE_SYMBOL)),chain::symbol(0,"RAM")).get_amount();
-      return {bytes_out,fee};
+      return std::make_tuple(bytes_out,fee);
    };
 
    auto sim_sell_ram = [&](RamMarket &market, int64_t bytes)-> auto {
