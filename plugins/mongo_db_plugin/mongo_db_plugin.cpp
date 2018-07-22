@@ -818,14 +818,14 @@ void mongo_db_plugin_impl::_process_accepted_transaction( const chain::transacti
       }
 
       trans_doc.append( kvp( "createdAt", b_date{now} ));
-
-      try {
-         if( !trans.insert_one( trans_doc.view())) {
-            EOS_ASSERT( false, chain::mongo_db_insert_fail, "Failed to insert trans ${id}", ("id", trx_id));
-         }
-      } catch(...) {
-         handle_mongo_exception("trans insert", __LINE__);
-      }
+//TODO: ignore trans_col
+      // try {
+      //    if( !trans.insert_one( trans_doc.view())) {
+      //       EOS_ASSERT( false, chain::mongo_db_insert_fail, "Failed to insert trans ${id}", ("id", trx_id));
+      //    }
+      // } catch(...) {
+      //    handle_mongo_exception("trans insert", __LINE__);
+      // }
 
       if (actions_to_write) {
          try {
@@ -869,13 +869,14 @@ void mongo_db_plugin_impl::_process_applied_transaction( const action_trace_tupl
    }
    trans_traces_doc.append( kvp( "createdAt", b_date{now} ));
 
-   try {
-      if( !trans_traces.insert_one( trans_traces_doc.view())) {
-         EOS_ASSERT( false, chain::mongo_db_insert_fail, "Failed to insert trans ${id}", ("id", t->id));
-      }
-   } catch(...) {
-      handle_mongo_exception("trans_traces insert: " + json, __LINE__);
-   }
+//TODO：ignore trans_traces 
+//    try {
+//       if( !trans_traces.insert_one( trans_traces_doc.view())) {
+//          EOS_ASSERT( false, chain::mongo_db_insert_fail, "Failed to insert trans ${id}", ("id", t->id));
+//       }
+//    } catch(...) {
+//       handle_mongo_exception("trans_traces insert: " + json, __LINE__);
+//    }
 
    ///handle action trace
    for(const auto& trace: tp.trace->action_traces){
